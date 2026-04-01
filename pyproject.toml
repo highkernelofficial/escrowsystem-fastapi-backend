@@ -1,0 +1,15 @@
+[project]
+name = "escrowsystem-fastapi-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.135.2",
+    "langchain>=1.2.14",
+    "langchain-google-genai>=4.2.1",
+    "langchain-mcp-adapters>=0.2.2",
+    "langgraph>=1.1.4",
+    "python-dotenv>=1.2.2",
+    "uvicorn>=0.42.0",
+]
