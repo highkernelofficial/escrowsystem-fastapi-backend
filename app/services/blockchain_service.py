@@ -1,5 +1,6 @@
 from algosdk.v2client import algod
 from algosdk import transaction, encoding
+from algosdk.logic import get_application_address  # 🔥 NEW
 import base64
 
 from app.contracts.compile_contract import compile_contract
@@ -81,10 +82,13 @@ def create_fund_project_txn(data):
 
     params = algod_client.suggested_params()
 
+    # 🔥 IMPORTANT FIX: derive escrow address from app_id
+    escrow_address = get_application_address(data.app_id)
+
     txn = transaction.PaymentTxn(
         sender=data.sender,
         sp=params,
-        receiver=data.escrow_address,
+        receiver=escrow_address,  # 🔥 FIXED
         amt=to_micro_algo(data.amount),
         note=b"fund_project",
     )
@@ -121,7 +125,7 @@ def create_release_txn(data):
         sp=params,
         index=data.app_id,
         app_args=app_args,
-        accounts=[data.freelancer_address],  # VERY IMPORTANT
+        accounts=[data.freelancer_address],
     )
 
     return {

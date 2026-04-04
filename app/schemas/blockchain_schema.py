@@ -9,9 +9,10 @@ class GetAppIdRequest(BaseModel):
     txn_id: str
 
 
+# 🔥 FIXED
 class FundProjectRequest(BaseModel):
     sender: str
-    escrow_address: str
+    app_id: int     # 🔥 instead of escrow_address
     amount: float
 
 
