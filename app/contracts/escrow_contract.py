@@ -54,7 +54,7 @@ def approval_program():
     release = Seq([
         Assert(is_creator),
         Assert(Txn.application_args.length() == Int(2)),
-        Assert(Txn.accounts.length() > Int(1)),
+        Assert(Txn.accounts.length() > Int(0)),  # NumAccounts excludes sender → 1 freelancer = NumAccounts(1) > 0 ✅
 
         # 🔥 STATUS CHECK
         Assert(

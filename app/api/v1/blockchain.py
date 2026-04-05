@@ -22,7 +22,7 @@ async def deploy_contract(req: DeployContractRequest):
 
 @router.post("/get-app-id")
 async def get_app_id(req: GetAppIdRequest):
-    return get_app_id_from_txn(req.txn_id)
+    return await get_app_id_from_txn(req.txn_id)
 
 
 @router.post("/fund-project")

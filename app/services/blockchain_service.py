@@ -1,14 +1,21 @@
-from algosdk.v2client import algod
-from algosdk import transaction, encoding
+from algosdk.v2client import algod, indexer
+from algosdk import transaction, encoding, error as algosdk_error
 from algosdk.logic import get_application_address
+from fastapi import HTTPException
+import asyncio
 import base64
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.contracts.compile_contract import compile_contract
 
 ALGOD_ADDRESS = "https://testnet-api.algonode.cloud"
+INDEXER_ADDRESS = "https://testnet-idx.algonode.cloud"
 ALGOD_TOKEN = ""
 
 algod_client = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
+indexer_client = indexer.IndexerClient("", INDEXER_ADDRESS)
 
 
 # -------------------------------
@@ -55,21 +62,115 @@ def create_deploy_contract_txn(data):
 
 
 # -------------------------------
+# INDEXER FALLBACK
+# -------------------------------
+async def _get_app_id_from_indexer(txn_id: str):
+    """
+    Query the Algonode indexer for a confirmed transaction.
+    Used when pending_transaction_info can't find a txn that has already
+    left the algod short-lived cache (~5 rounds after confirmation).
+    """
+    try:
+        result = await asyncio.to_thread(indexer_client.transaction, txn_id)
+        txn = result.get("transaction", {})
+
+        # ApplicationCreate transactions have 'created-application-index'
+        app_id = txn.get("created-application-index")
+
+        if not app_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Transaction {txn_id} found in indexer but has no created-application-index. "
+                    "Make sure the txn_id is from an ApplicationCreate transaction."
+                )
+            )
+
+        return {"app_id": app_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[indexer] Transaction {txn_id} not found. Error: {e}")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Transaction {txn_id} not found in algod or indexer. "
+                "It was likely never submitted or is invalid. "
+                "Please redeploy the contract and use the new transaction ID."
+            )
+        )
+
+
+# -------------------------------
 # GET APP ID
 # -------------------------------
-def get_app_id_from_txn(txn_id: str):
+async def get_app_id_from_txn(txn_id: str):
 
-    result = transaction.wait_for_confirmation(algod_client, txn_id, 4)
+    logger.info(f"[get-app-id] Received txn_id: {txn_id}")
 
-    if not result:
-        raise Exception("Transaction confirmation failed")
+    # ----------------------------------------
+    # STEP 1: Check if already confirmed (fast path, no waiting)
+    # This handles cases where the frontend calls this endpoint late
+    # ----------------------------------------
+    try:
+        info = await asyncio.to_thread(algod_client.pending_transaction_info, txn_id)
+
+        if info.get("confirmed-round", 0) > 0:
+            # Transaction already confirmed — extract app_id immediately
+            if "application-index" not in info:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Transaction {txn_id} confirmed but has no application-index. "
+                        "Make sure the txn_id is from an ApplicationCreate transaction."
+                    )
+                )
+            return {"app_id": info["application-index"]}
+
+        pool_error = info.get("pool-error", "")
+        if pool_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Transaction {txn_id} was rejected by the pool: {pool_error}"
+            )
+
+    except HTTPException:
+        raise  # re-raise our own HTTP errors
+    except Exception:
+        # pending_transaction_info throws if txn has left the algod cache (~5 rounds)
+        # Fall back to indexer which stores all confirmed transactions permanently
+        return await _get_app_id_from_indexer(txn_id)
+
+    # ----------------------------------------
+    # STEP 2: Transaction still pending — wait for confirmation
+    # ----------------------------------------
+    try:
+        result = await asyncio.to_thread(
+            transaction.wait_for_confirmation,
+            algod_client,
+            txn_id,
+            10  # wait up to 10 rounds (~33 seconds on testnet)
+        )
+    except algosdk_error.ConfirmationTimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Transaction {txn_id} was not confirmed within 10 rounds. "
+                "Algorand testnet may be slow — wait a few seconds and retry."
+            )
+        )
 
     if "application-index" not in result:
-        raise Exception(f"App ID not found. Full result: {result}")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Transaction {txn_id} confirmed but has no application-index. "
+                "Make sure the txn_id is from an ApplicationCreate transaction."
+            )
+        )
 
-    return {
-        "app_id": result["application-index"]
-    }
+    return {"app_id": result["application-index"]}
 
 
 # -------------------------------
