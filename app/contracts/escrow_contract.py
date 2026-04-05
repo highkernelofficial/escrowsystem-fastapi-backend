@@ -1,6 +1,5 @@
 from pyteal import *
 
-
 def approval_program():
 
     creator_key = Bytes("creator")
@@ -12,25 +11,68 @@ def approval_program():
 
     is_creator = Txn.sender() == App.globalGet(creator_key)
 
-    # 🔥 FIX: use ScratchVar
     amount = ScratchVar(TealType.uint64)
 
+    # -------------------------------
+    # FUND
+    # -------------------------------
+    fund = Seq([
+        Assert(Txn.application_args.length() == Int(3)),
+
+        App.globalPut(
+            Txn.application_args[1],
+            Btoi(Txn.application_args[2])
+        ),
+
+        # status = 2 (SUBMITTED)
+        App.globalPut(
+            Concat(Txn.application_args[1], Bytes("_status")),
+            Int(2)
+        ),
+
+        Approve()
+    ])
+
+    # -------------------------------
+    # APPROVE
+    # -------------------------------
+    approve = Seq([
+        Assert(is_creator),
+        Assert(Txn.application_args.length() == Int(2)),
+
+        App.globalPut(
+            Concat(Txn.application_args[1], Bytes("_status")),
+            Int(3)
+        ),
+
+        Approve()
+    ])
+
+    # -------------------------------
+    # RELEASE
+    # -------------------------------
     release = Seq([
         Assert(is_creator),
-        Assert(Txn.application_args.length() == Int(3)),
+        Assert(Txn.application_args.length() == Int(2)),
         Assert(Txn.accounts.length() > Int(1)),
 
-        # store value safely
-        amount.store(Btoi(Txn.application_args[2])),
+        # 🔥 STATUS CHECK
+        Assert(
+            App.globalGet(
+                Concat(Txn.application_args[1], Bytes("_status"))
+            ) == Int(3)
+        ),
+
+        amount.store(App.globalGet(Txn.application_args[1])),
+
+        Assert(amount.load() > Int(0)),
 
         InnerTxnBuilder.Begin(),
-
         InnerTxnBuilder.SetFields({
             TxnField.type_enum: TxnType.Payment,
             TxnField.receiver: Txn.accounts[1],
             TxnField.amount: amount.load(),
         }),
-
         InnerTxnBuilder.Submit(),
 
         Approve()
@@ -40,6 +82,8 @@ def approval_program():
         [Txn.application_id() == Int(0), on_create],
         [Txn.on_completion() == OnComplete.NoOp,
             Cond(
+                [Txn.application_args[0] == Bytes("fund"), fund],
+                [Txn.application_args[0] == Bytes("approve"), approve],
                 [Txn.application_args[0] == Bytes("release"), release]
             )
         ]

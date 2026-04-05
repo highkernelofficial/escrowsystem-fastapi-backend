@@ -1,6 +1,6 @@
 from algosdk.v2client import algod
 from algosdk import transaction, encoding
-from algosdk.logic import get_application_address  # 🔥 NEW
+from algosdk.logic import get_application_address
 import base64
 
 from app.contracts.compile_contract import compile_contract
@@ -45,7 +45,7 @@ def create_deploy_contract_txn(data):
         on_complete=transaction.OnComplete.NoOpOC,
         approval_program=approval_program,
         clear_program=clear_program,
-        global_schema=transaction.StateSchema(num_uints=1, num_byte_slices=1),
+        global_schema=transaction.StateSchema(num_uints=16, num_byte_slices=4),  # 2 uint slots per milestone (amount + status), up to 8 milestones; 1 byte slice for creator key
         local_schema=transaction.StateSchema(num_uints=0, num_byte_slices=0),
     )
 
@@ -73,61 +73,113 @@ def get_app_id_from_txn(txn_id: str):
 
 
 # -------------------------------
-# FUND PROJECT (FULL ESCROW)
+# FUND PROJECT (ESCROW + STATE STORE)
 # -------------------------------
 def create_fund_project_txn(data):
 
     if data.amount <= 0:
         raise Exception("Amount must be greater than 0")
 
+    if not data.milestone_id:
+        raise Exception("Milestone ID required")
+
     params = algod_client.suggested_params()
 
-    # 🔥 IMPORTANT FIX: derive escrow address from app_id
     escrow_address = get_application_address(data.app_id)
 
-    txn = transaction.PaymentTxn(
+    amount_micro = to_micro_algo(data.amount)
+
+    # -------------------------------
+    # 1. Payment txn (fund escrow)
+    # -------------------------------
+    pay_txn = transaction.PaymentTxn(
         sender=data.sender,
         sp=params,
-        receiver=escrow_address,  # 🔥 FIXED
-        amt=to_micro_algo(data.amount),
-        note=b"fund_project",
+        receiver=escrow_address,
+        amt=amount_micro,
     )
 
-    return {
-        "txn": encoding.msgpack_encode(txn)
-    }
-
-
-# -------------------------------
-# RELEASE MILESTONE
-# -------------------------------
-def create_release_txn(data):
-
-    if data.amount <= 0:
-        raise Exception("Invalid amount")
-
-    if not data.freelancer_address:
-        raise Exception("Freelancer address required")
-
-    params = algod_client.suggested_params()
-
-    amount_micro = to_micro_algo(data.amount)
-    amount_bytes = amount_micro.to_bytes(8, "big")
-
+    # -------------------------------
+    # 2. App call txn (store milestone)
+    # -------------------------------
     app_args = [
-        b"release",
+        b"fund",
         data.milestone_id.encode(),
-        amount_bytes
+        amount_micro.to_bytes(8, "big")
     ]
 
-    txn = transaction.ApplicationNoOpTxn(
+    app_txn = transaction.ApplicationNoOpTxn(
         sender=data.sender,
         sp=params,
         index=data.app_id,
         app_args=app_args,
+    )
+
+    # -------------------------------
+    # 3. Group txn
+    # -------------------------------
+    gid = transaction.calculate_group_id([pay_txn, app_txn])
+    pay_txn.group = gid
+    app_txn.group = gid
+
+    return {
+        "txn": [
+            encoding.msgpack_encode(pay_txn),
+            encoding.msgpack_encode(app_txn)
+        ]
+    }
+
+
+# -------------------------------
+# RELEASE MILESTONE (CONTRACT CONTROLLED)
+# -------------------------------
+def create_release_txn(data):
+
+    if not data.freelancer_address:
+        raise Exception("Freelancer address required")
+
+    if not data.milestone_id:
+        raise Exception("Milestone ID required")
+
+    params = algod_client.suggested_params()
+
+    # -------------------------------
+    # 1️⃣ APPROVE TXN
+    # -------------------------------
+    approve_txn = transaction.ApplicationNoOpTxn(
+        sender=data.sender,
+        sp=params,
+        index=data.app_id,
+        app_args=[
+            b"approve",
+            data.milestone_id.encode()
+        ],
+    )
+
+    # -------------------------------
+    # 2️⃣ RELEASE TXN
+    # -------------------------------
+    release_txn = transaction.ApplicationNoOpTxn(
+        sender=data.sender,
+        sp=params,
+        index=data.app_id,
+        app_args=[
+            b"release",
+            data.milestone_id.encode()
+        ],
         accounts=[data.freelancer_address],
     )
 
+    # -------------------------------
+    # 3️⃣ GROUP
+    # -------------------------------
+    gid = transaction.calculate_group_id([approve_txn, release_txn])
+    approve_txn.group = gid
+    release_txn.group = gid
+
     return {
-        "txn": encoding.msgpack_encode(txn)
+        "txn": [
+            encoding.msgpack_encode(approve_txn),
+            encoding.msgpack_encode(release_txn)
+        ]
     }
