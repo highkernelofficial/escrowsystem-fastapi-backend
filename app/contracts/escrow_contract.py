@@ -72,6 +72,7 @@ def approval_program():
             TxnField.type_enum: TxnType.Payment,
             TxnField.receiver: Txn.accounts[1],
             TxnField.amount: amount.load(),
+            TxnField.fee: Int(0),  # Fee Pooling: Sender covers the fee
         }),
         InnerTxnBuilder.Submit(),
 
@@ -110,6 +111,7 @@ def approval_program():
             TxnField.type_enum: TxnType.Payment,
             TxnField.receiver: Txn.accounts[1],
             TxnField.amount: amount.load(),
+            TxnField.fee: Int(0),  # Fee Pooling: Sender covers the fee
         }),
         InnerTxnBuilder.Submit(),
 

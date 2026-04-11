@@ -195,12 +195,15 @@ def create_fund_project_txn(data):
     escrow_address = get_application_address(data.app_id)
     total_micro = to_micro_algo(data.total_amount)
 
-    # ── 1. Single Payment txn for the full project amount ──────────
+    # ── 1. Single Payment txn for the full project amount + MBR Buffer ──────────
+    # We add 100,001 microAlgos (0.1 ALGO) to cover the account's Minimum Balance Requirement (MBR)
+    # and a small buffer for future fees.
+    funding_amount = total_micro + 100001
     pay_txn = transaction.PaymentTxn(
         sender=data.sender,
         sp=params,
         receiver=escrow_address,
-        amt=total_micro,
+        amt=funding_amount,
     )
 
     # ── 2. One App call per milestone ──────────────────────────────
@@ -251,6 +254,8 @@ def create_release_txn(data):
         raise Exception("Milestone ID required")
 
     params = algod_client.suggested_params()
+    params.fee = 2000  # Set to 2x min fee (1000 for app call + 1000 for inner payment)
+    params.flat_fee = True
 
     # Single app call: approve + release in one transaction
     release_txn = transaction.ApplicationNoOpTxn(
