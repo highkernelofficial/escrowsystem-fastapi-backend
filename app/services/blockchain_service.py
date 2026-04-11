@@ -177,62 +177,70 @@ async def get_app_id_from_txn(txn_id: str):
 # FUND PROJECT (ESCROW + STATE STORE)
 # -------------------------------
 def create_fund_project_txn(data):
+    """
+    Builds an atomic transaction group to fund the entire project at once:
+      - 1x PaymentTxn  → sends total_amount (all milestones combined) to escrow
+      - Nx AppNoOpTxn  → one per milestone, stores (milestone_id → amount) and
+                         (milestone_id_status → 2) in contract global state
+    This ensures every milestone's amount is registered on-chain so that
+    the `release` operation can later read and send it to the freelancer.
+    """
+    if not data.milestones:
+        raise Exception("At least one milestone is required")
 
-    if data.amount <= 0:
-        raise Exception("Amount must be greater than 0")
-
-    if not data.milestone_id:
-        raise Exception("Milestone ID required")
+    if data.total_amount <= 0:
+        raise Exception("Total amount must be greater than 0")
 
     params = algod_client.suggested_params()
-
     escrow_address = get_application_address(data.app_id)
+    total_micro = to_micro_algo(data.total_amount)
 
-    amount_micro = to_micro_algo(data.amount)
-
-    # -------------------------------
-    # 1. Payment txn (fund escrow)
-    # -------------------------------
+    # ── 1. Single Payment txn for the full project amount ──────────
     pay_txn = transaction.PaymentTxn(
         sender=data.sender,
         sp=params,
         receiver=escrow_address,
-        amt=amount_micro,
+        amt=total_micro,
     )
 
-    # -------------------------------
-    # 2. App call txn (store milestone)
-    # -------------------------------
-    app_args = [
-        b"fund",
-        data.milestone_id.encode(),
-        amount_micro.to_bytes(8, "big")
-    ]
-
-    app_txn = transaction.ApplicationNoOpTxn(
-        sender=data.sender,
-        sp=params,
-        index=data.app_id,
-        app_args=app_args,
-    )
-
-    # -------------------------------
-    # 3. Group txn
-    # -------------------------------
-    gid = transaction.calculate_group_id([pay_txn, app_txn])
-    pay_txn.group = gid
-    app_txn.group = gid
-
-    return {
-        "txn": [
-            encoding.msgpack_encode(pay_txn),
-            encoding.msgpack_encode(app_txn)
+    # ── 2. One App call per milestone ──────────────────────────────
+    # Each call stores:  globalState[milestone_id]         = amount_micro
+    #                    globalState[milestone_id + _status] = 2 (funded)
+    app_txns = []
+    for milestone in data.milestones:
+        amount_micro = to_micro_algo(milestone.amount)
+        app_args = [
+            b"fund",
+            milestone.milestone_id.encode(),
+            amount_micro.to_bytes(8, "big"),
         ]
-    }
+        app_txn = transaction.ApplicationNoOpTxn(
+            sender=data.sender,
+            sp=params,
+            index=data.app_id,
+            app_args=app_args,
+        )
+        app_txns.append(app_txn)
+
+    # ── 3. Group everything atomically ─────────────────────────────
+    all_txns = [pay_txn] + app_txns
+    gid = transaction.calculate_group_id(all_txns)
+    for txn in all_txns:
+        txn.group = gid
+
+    encoded = [encoding.msgpack_encode(txn) for txn in all_txns]
+    logger.info(f"[fund-project] Built atomic group: 1 PaymentTxn + {len(app_txns)} AppNoOpTxn(s) | total={total_micro} µAlgo")
+    return {"txns": encoded}
 
 
 # -------------------------------
 # RELEASE MILESTONE (CONTRACT CONTROLLED)
+# Uses a single "approve_and_release" app call that atomically
+# checks status==2 (funded), sets status→3, and releases payment.
+# This is the cleanest approach because:
+#   - Grouped approve+release fails (Algorand state isolation)
+#   - Ungrouped sequential fails (Pera merges signed txns)
+#   - Single atomic call handles everything in one shot
 # -------------------------------
 def create_release_txn(data):
 
@@ -244,43 +252,18 @@ def create_release_txn(data):
 
     params = algod_client.suggested_params()
 
-    # -------------------------------
-    # 1️⃣ APPROVE TXN
-    # -------------------------------
-    approve_txn = transaction.ApplicationNoOpTxn(
-        sender=data.sender,
-        sp=params,
-        index=data.app_id,
-        app_args=[
-            b"approve",
-            data.milestone_id.encode()
-        ],
-    )
-
-    # -------------------------------
-    # 2️⃣ RELEASE TXN
-    # -------------------------------
+    # Single app call: approve + release in one transaction
     release_txn = transaction.ApplicationNoOpTxn(
         sender=data.sender,
         sp=params,
         index=data.app_id,
         app_args=[
-            b"release",
+            b"approve_and_release",
             data.milestone_id.encode()
         ],
         accounts=[data.freelancer_address],
     )
 
-    # -------------------------------
-    # 3️⃣ GROUP
-    # -------------------------------
-    gid = transaction.calculate_group_id([approve_txn, release_txn])
-    approve_txn.group = gid
-    release_txn.group = gid
-
     return {
-        "txn": [
-            encoding.msgpack_encode(approve_txn),
-            encoding.msgpack_encode(release_txn)
-        ]
+        "txn": encoding.msgpack_encode(release_txn)
     }
